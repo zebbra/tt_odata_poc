@@ -33,12 +33,20 @@ defmodule ODataClient do
   end
 
   @doc """
-  Load and parse a Postman collection from a file.
+  Load and parse a Postman collection from a file or URL.
   """
-  def load_collection(file_path) do
-    file_path
-    |> File.read!()
-    |> Jason.decode!()
+  def load_collection(path_or_url) do
+    content =
+      if String.starts_with?(path_or_url, ["http://", "https://"]) do
+        # If it's a URL, fetch it using Req
+        response = Req.get!(path_or_url)
+        response.body
+      else
+        # If it's a file path, read it from the filesystem
+        File.read!(path_or_url)
+      end
+
+    Jason.decode!(content)
   end
 
   @doc """
@@ -236,22 +244,9 @@ end
 IO.puts("OData Client Demo")
 IO.puts("----------------")
 
-# Get the directory of the current script
-script_dir = Path.dirname(__ENV__.file)
-
-# Construct the absolute path to the Postman collection
-collection_path = Path.join(script_dir, "postman_collection_sap_odata.json")
-
-# Check if the file exists before trying to load it
-unless File.exists?(collection_path) do
-  # Display an error if the file is not found
-  IO.puts(
-    :stderr,
-    "Error: Could not find postman_collection_sap_odata.json at #{collection_path}"
-  )
-
-  System.halt(1)
-end
+# Use the raw GitHub URL for the Postman collection
+collection_path =
+  "https://raw.githubusercontent.com/zebbra/tt_odata_poc/main/postman_collection_sap_odata.json"
 
 # Initialize the client
 client = ODataClient.new(collection_path)

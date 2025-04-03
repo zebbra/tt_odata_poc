@@ -8,9 +8,9 @@ This Livebook provides an interface to interact with OData services using a dyna
 
 First, let's set up our dependencies. We'll use:
 
-* `jason` for JSON parsing
-* `tesla` for HTTP requests
-* `req` as an alternative HTTP client
+- `jason` for JSON parsing
+- `tesla` for HTTP requests
+- `req` as an alternative HTTP client
 
 ```elixir
 Mix.install([
@@ -60,12 +60,20 @@ defmodule ODataClient do
   end
 
   @doc """
-  Load and parse a Postman collection from a file.
+  Load and parse a Postman collection from a file or URL.
   """
-  def load_collection(file_path) do
-    file_path
-    |> File.read!()
-    |> Jason.decode!()
+  def load_collection(path_or_url) do
+    content =
+      if String.starts_with?(path_or_url, ["http://", "https://"]) do
+        # If it's a URL, fetch it using Req
+        response = Req.get!(path_or_url)
+        response.body
+      else
+        # If it's a file path, read it from the filesystem
+        File.read!(path_or_url)
+      end
+
+    Jason.decode!(content)
   end
 
   @doc """
@@ -252,44 +260,19 @@ end
 Now let's initialize our client with the Postman collection:
 
 ```elixir
-# Get the directory of the current Livebook file
-livebook_dir = __DIR__
+# Use the raw GitHub URL for the Postman collection
+collection_path = "https://raw.githubusercontent.com/zebbra/tt_odata_poc/main/postman_collection_sap_odata.json"
 
-# Construct the absolute path to the Postman collection
-collection_path = Path.join(livebook_dir, "postman_collection_sap_odata.json")
-
-# Check if the file exists before trying to load it
-if File.exists?(collection_path) do
-  # Initialize the client
-  client = ODataClient.new(collection_path)
-
-  # List all available functions
-  ODataClient.list_functions(client)
-else
-  # Display an error if the file is not found
-  IO.puts(:stderr, "Error: Could not find postman_collection_sap_odata.json at #{collection_path}")
-  # You might want to raise an error or handle this differently
-  :error
-end
-```
-
-## Example Usage
-
-Initialize first
-
-```elixir
 # Initialize the client
 client = ODataClient.new(collection_path)
 
 # List all available functions
-IO.puts("\nAvailable functions:")
-
-client.functions
-|> Enum.map(fn function -> "- #{function.name}" end)
-|> Enum.each(&IO.puts/1)
+ODataClient.list_functions(client)
 ```
 
-Let's try some example requests:
+## Example Usage
+
+Now that we have initialized the client, let's try some example requests:
 
 ```elixir
 # Read the service root
@@ -407,10 +390,10 @@ This Livebook demonstrates a dynamic OData client that adapts to the structure o
 
 Key features:
 
-* Dynamically generates functions based on a Postman collection
-* Supports all HTTP methods (GET, POST, PUT, PATCH, DELETE)
-* Handles path and query parameters
-* Supports request bodies for POST, PUT, and PATCH requests
-* Can be extended with custom headers for authentication and concurrency control
+- Dynamically generates functions based on a Postman collection
+- Supports all HTTP methods (GET, POST, PUT, PATCH, DELETE)
+- Handles path and query parameters
+- Supports request bodies for POST, PUT, and PATCH requests
+- Can be extended with custom headers for authentication and concurrency control
 
 If you update the Postman collection, simply reinitialize the client to get the updated functions.
