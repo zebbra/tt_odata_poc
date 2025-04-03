@@ -1,0 +1,416 @@
+# OData REST Client
+
+## Introduction
+
+This Livebook provides an interface to interact with OData services using a dynamically generated client based on a Postman collection. The client adapts to the structure of the Postman collection, automatically generating functions for each request defined in the collection.
+
+## Setup
+
+First, let's set up our dependencies. We'll use:
+
+* `jason` for JSON parsing
+* `tesla` for HTTP requests
+* `req` as an alternative HTTP client
+
+```elixir
+Mix.install([
+  {:jason, "~> 1.4"},
+  {:tesla, "~> 1.4"},
+  {:hackney, "~> 1.18"},
+  {:req, "~> 0.3.0"}
+])
+```
+
+## OData Client Implementation
+
+Let's define our OData client module that will parse the Postman collection and generate the appropriate functions.
+
+```elixir
+defmodule ODataClient do
+  @moduledoc """
+  A dynamic OData client that generates functions based on a Postman collection.
+  """
+
+  # Define a struct to hold the client configuration
+  defstruct [:collection, :base_url, :functions]
+
+  @doc """
+  Initialize a new OData client from a Postman collection file.
+
+  ## Parameters
+
+  - `file_path`: Path to the Postman collection JSON file
+  - `options`: Additional options for the client
+    - `:base_url`: Override the base URL from the collection
+
+  ## Returns
+
+  A new ODataClient struct with the parsed collection and generated functions.
+  """
+  def new(file_path, options \\ []) do
+    collection = load_collection(file_path)
+    base_url = Keyword.get(options, :base_url)
+    functions = generate_functions(collection)
+
+    %__MODULE__{
+      collection: collection,
+      base_url: base_url,
+      functions: functions
+    }
+  end
+
+  @doc """
+  Load and parse a Postman collection from a file.
+  """
+  def load_collection(file_path) do
+    file_path
+    |> File.read!()
+    |> Jason.decode!()
+  end
+
+  @doc """
+  Generate function metadata from the Postman collection.
+  """
+  def generate_functions(collection) do
+    collection["item"]
+    |> Enum.map(fn item ->
+      function_name = generate_function_name(item["name"])
+      method = get_method(item)
+      url = get_url(item)
+      params = extract_params(url, item)
+      body = get_body(item)
+
+      %{
+        name: function_name,
+        original_name: item["name"],
+        method: method,
+        url: url,
+        params: params,
+        body: body,
+        description: item["request"]["description"]
+      }
+    end)
+  end
+
+  @doc """
+  Generate a function name from a request name.
+  """
+  def generate_function_name(name) do
+    name
+    |> String.downcase()
+    |> String.replace(~r/^\d+\.\s+/, "")  # Remove leading numbers and dots
+    |> String.replace(~r/[^a-z0-9\s]/u, " ")  # Replace non-alphanumeric with spaces
+    |> String.split()
+    |> Enum.join("_")
+    |> String.to_atom()
+  end
+
+  @doc """
+  Get the HTTP method from a request item.
+  """
+  def get_method(item) do
+    item["request"]["method"]
+    |> String.downcase()
+    |> String.to_atom()
+  end
+
+  @doc """
+  Get the URL from a request item.
+  """
+  def get_url(item) do
+    case item["request"]["url"] do
+      url when is_binary(url) -> url
+      url when is_map(url) -> url["raw"]
+    end
+  end
+
+  @doc """
+  Extract parameters from a URL and request.
+  """
+  def extract_params(url, item) do
+    # Extract path parameters (e.g., People('russellwhyte'))
+    path_params = Regex.scan(~r/'([^']+)'/, url)
+                  |> Enum.map(fn [_, param] -> param end)
+
+    # Extract query parameters if available
+    query_params = case item["request"]["url"] do
+      url when is_map(url) ->
+        # Check if "query" exists and is a list inside the clause body
+        case url["query"] do
+          query_list when is_list(query_list) ->
+            query_list
+            |> Enum.map(fn param -> param["key"] end)
+          _ -> # Handle cases where "query" is missing or not a list
+            []
+        end
+      _ -> # Handle cases where item["request"]["url"] is not a map
+        []
+    end
+
+    # Combine all parameters
+    path_params ++ query_params
+  end
+
+  @doc """
+  Get the request body if available.
+  """
+  def get_body(item) do
+    case get_in(item, ["request", "body", "raw"]) do
+      nil -> nil
+      raw_body ->
+        try do
+          Jason.decode!(raw_body)
+        rescue
+          _ -> raw_body
+        end
+    end
+  end
+
+  @doc """
+  Execute a request using the specified function name and parameters.
+  """
+  def execute(client, function_name, params \\ %{}, body \\ nil) do
+    function = Enum.find(client.functions, fn f -> f.name == function_name end)
+
+    unless function do
+      raise "Function #{function_name} not found in the OData client"
+    end
+
+    # Prepare the URL with parameters
+    url = prepare_url(function.url, params)
+
+    # Prepare the request body
+    request_body = body || function.body
+
+    # Execute the request
+    case function.method do
+      :get -> Req.get!(url)
+      :post -> Req.post!(url, json: request_body)
+      :put -> Req.put!(url, json: request_body)
+      :patch -> Req.patch!(url, json: request_body)
+      :delete -> Req.delete!(url)
+    end
+  end
+
+  @doc """
+  Prepare a URL by replacing parameters with their values.
+  """
+  def prepare_url(url, params) do
+    # Replace path parameters
+    url = Regex.replace(~r/'([^']+)'/, url, fn _, param ->
+      case Map.get(params, String.to_atom(param)) || Map.get(params, param) do
+        nil -> "'#{param}'"  # Keep original if not provided
+        value -> "'#{value}'"
+      end
+    end)
+
+    # Add query parameters, but only if they don't already exist in the URL
+    query_params = for {key, value} <- params,
+                      is_binary(key) && String.starts_with?(key, "$"),
+                      # Skip if the parameter already exists in the URL
+                      not String.contains?(url, "#{key}="),
+                      do: "#{key}=#{URI.encode_www_form(value)}"
+
+    if Enum.empty?(query_params) do
+      url
+    else
+      if String.contains?(url, "?") do
+        "#{url}&#{Enum.join(query_params, "&")}"
+      else
+        "#{url}?#{Enum.join(query_params, "&")}"
+      end
+    end
+  end
+
+  @doc """
+  List all available functions in the client.
+  """
+  def list_functions(client) do
+    client.functions
+    |> Enum.map(fn function ->
+      %{
+        name: function.name,
+        original_name: function.original_name,
+        method: function.method,
+        url: function.url,
+        params: function.params
+      }
+    end)
+  end
+
+  @doc """
+  Get detailed information about a specific function.
+  """
+  def get_function_info(client, function_name) do
+    Enum.find(client.functions, fn f -> f.name == function_name end)
+  end
+end
+```
+
+## Using the OData Client
+
+Now let's initialize our client with the Postman collection:
+
+```elixir
+# Get the directory of the current Livebook file
+livebook_dir = __DIR__
+
+# Construct the absolute path to the Postman collection
+collection_path = Path.join(livebook_dir, "postman_collection_sap_odata.json")
+
+# Check if the file exists before trying to load it
+if File.exists?(collection_path) do
+  # Initialize the client
+  client = ODataClient.new(collection_path)
+
+  # List all available functions
+  ODataClient.list_functions(client)
+else
+  # Display an error if the file is not found
+  IO.puts(:stderr, "Error: Could not find postman_collection_sap_odata.json at #{collection_path}")
+  # You might want to raise an error or handle this differently
+  :error
+end
+```
+
+## Example Usage
+
+Initialize first
+
+```elixir
+# Initialize the client
+client = ODataClient.new(collection_path)
+
+# List all available functions
+IO.puts("\nAvailable functions:")
+
+client.functions
+|> Enum.map(fn function -> "- #{function.name}" end)
+|> Enum.each(&IO.puts/1)
+```
+
+Let's try some example requests:
+
+```elixir
+# Read the service root
+ODataClient.execute(client, :read_the_service_root)
+```
+
+```elixir
+# Get a list of people
+ODataClient.execute(client, :read_an_entity_set)
+```
+
+```elixir
+# Get a specific person
+ODataClient.execute(client, :get_a_single_entity_from_an_entity_set, %{"russellwhyte" => "russellwhyte"})
+```
+
+```elixir
+# Filter people by first name
+ODataClient.execute(client, :read_an_entity_set, %{"$filter" => "FirstName eq 'Scott'"})
+```
+
+## Creating a New Entity
+
+```elixir
+# Create a new person
+new_person = %{
+  "UserName" => "johndoe",
+  "FirstName" => "John",
+  "LastName" => "Doe",
+  "Gender" => "Male"
+}
+
+ODataClient.execute(client, :create_an_entity, %{}, new_person)
+```
+
+## Updating an Entity
+
+```elixir
+# Update a person's email
+update_data = %{
+  "Emails" => ["johndoe@contoso.com", "johndoe@example.com"]
+}
+
+# Note: In a real scenario, you would need to include the If-Match header with the ETag
+ODataClient.execute(client, :update_an_entity, %{"miathompson" => "johndoe"}, update_data)
+```
+
+## Deleting an Entity
+
+```elixir
+# Delete a person
+# Note: In a real scenario, you would need to include the If-Match header with the ETag
+ODataClient.execute(client, :delete_an_entity, %{"miathompson" => "johndoe"})
+```
+
+## Advanced Usage: Custom Headers and Authentication
+
+For scenarios requiring custom headers (like authentication or ETags for concurrency control), we can extend our client:
+
+```elixir
+defmodule ODataClientExtended do
+  @doc """
+  Execute a request with custom headers.
+  """
+  def execute_with_headers(client, function_name, headers, params \\ %{}, body \\ nil) do
+    function = Enum.find(client.functions, fn f -> f.name == function_name end)
+
+    unless function do
+      raise "Function #{function_name} not found in the OData client"
+    end
+
+    # Prepare the URL with parameters
+    url = ODataClient.prepare_url(function.url, params)
+
+    # Prepare the request body
+    request_body = body || function.body
+
+    # Execute the request with custom headers
+    case function.method do
+      :get -> Req.get!(url, headers: headers)
+      :post -> Req.post!(url, json: request_body, headers: headers)
+      :put -> Req.put!(url, json: request_body, headers: headers)
+      :patch -> Req.patch!(url, json: request_body, headers: headers)
+      :delete -> Req.delete!(url, headers: headers)
+    end
+  end
+end
+```
+
+Example with custom headers:
+
+```elixir
+# Update with concurrency control
+headers = [
+  {"If-Match", "W/\"08D2931BACB7D7FD\""},
+  {"Content-Type", "application/json"}
+]
+
+update_data = %{
+  "Emails" => ["johndoe@contoso.com", "johndoe@example.com"]
+}
+
+ODataClientExtended.execute_with_headers(
+  client,
+  :update_an_entity,
+  headers,
+  %{"miathompson" => "johndoe"},
+  update_data
+)
+```
+
+## Conclusion
+
+This Livebook demonstrates a dynamic OData client that adapts to the structure of a Postman collection. The client automatically generates functions for each request defined in the collection, making it easy to interact with OData services.
+
+Key features:
+
+* Dynamically generates functions based on a Postman collection
+* Supports all HTTP methods (GET, POST, PUT, PATCH, DELETE)
+* Handles path and query parameters
+* Supports request bodies for POST, PUT, and PATCH requests
+* Can be extended with custom headers for authentication and concurrency control
+
+If you update the Postman collection, simply reinitialize the client to get the updated functions.
